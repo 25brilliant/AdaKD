@@ -16,6 +16,10 @@ model_urls = {
 }
 
 
+def conv1x1(in_planes, out_planes, stride=1):
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
 class VGG(nn.Module):
 
     def __init__(self, cfg, batch_norm=False, num_classes=1000):
@@ -30,11 +34,73 @@ class VGG(nn.Module):
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.pool4 = nn.AdaptiveAvgPool2d((1, 1))
-        # self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.layerwise_num_channels = [128, 256, 512, 512]
+        self.teacher_layerwise_num_channels = [256, 512, 1024, 2048]
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(self.layerwise_num_channels[0], self.layerwise_num_channels[0], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            nn.Conv2d(self.layerwise_num_channels[0], self.layerwise_num_channels[0], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            conv1x1(self.layerwise_num_channels[0], self.teacher_layerwise_num_channels[0]),
+            conv1x1(self.teacher_layerwise_num_channels[0], self.teacher_layerwise_num_channels[0]),
+        )
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(self.layerwise_num_channels[1], self.layerwise_num_channels[1], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            nn.Conv2d(self.layerwise_num_channels[1], self.layerwise_num_channels[1], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            conv1x1(self.layerwise_num_channels[1], self.teacher_layerwise_num_channels[1]),
+            conv1x1(self.teacher_layerwise_num_channels[1], self.teacher_layerwise_num_channels[1]),
+        )
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(self.layerwise_num_channels[2], self.layerwise_num_channels[2], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            nn.Conv2d(self.layerwise_num_channels[2], self.layerwise_num_channels[2], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            conv1x1(self.layerwise_num_channels[2], self.teacher_layerwise_num_channels[2]),
+            conv1x1(self.teacher_layerwise_num_channels[2], self.teacher_layerwise_num_channels[2]),
+        )
+        self.branch4 = nn.Sequential(
+            nn.Conv2d(self.layerwise_num_channels[3], self.layerwise_num_channels[3], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            nn.Conv2d(self.layerwise_num_channels[3], self.layerwise_num_channels[3], kernel_size=3, stride=1,
+                      padding=1, bias=True),
+            conv1x1(self.layerwise_num_channels[3], self.teacher_layerwise_num_channels[3]),
+            conv1x1(self.teacher_layerwise_num_channels[3], self.teacher_layerwise_num_channels[3]),
+        )
+        init_variance_param_value = self._variance_param_to_variance(torch.tensor(5.0))
+        self.variance_param1 = nn.Parameter(
+            torch.full([3136], init_variance_param_value)
+        )
+        self.variance_param2 = nn.Parameter(
+            torch.full([784], init_variance_param_value)
+        )
+        self.variance_param3 = nn.Parameter(
+            torch.full([196], init_variance_param_value)
+        )
+        self.variance_param4 = nn.Parameter(
+            torch.full([49], init_variance_param_value)
+        )
 
         self.classifier = nn.Linear(512, num_classes)
         self._initialize_weights()
+
+    def _varance_to_variance_param(self, variance):
+        """
+        Convert variance to corresponding variance parameter by inverse of the softplus function.
+        :param torch.FloatTensor variance: the target variance for obtaining the variance parameter
+        """
+        return torch.log(torch.exp(variance) - 1.0)
+
+    def _variance_param_to_variance(self, variance_param):
+        """
+        Convert the variance parameter to corresponding variance by the softplus function.
+        :param torch.FloatTensor variance_param: the target variance parameter for obtaining the variance
+        """
+        return torch.log(torch.exp(variance_param) + 1.0)
 
     def get_feat_modules(self):
         feat_m = nn.ModuleList([])
@@ -58,41 +124,71 @@ class VGG(nn.Module):
         return [bn1, bn2, bn3, bn4]
 
     def forward(self, x, is_feat=False, preact=False):
-        h = x.shape[2]
         x = F.relu(self.block0(x))
-        f0 = x
+        f0 = x 
 
         x = self.pool0(x)
+        f0_1 = x
         x = self.block1(x)
-        f1_pre = x
         x = F.relu(x)
-        f1 = x
+        f1 = x  
 
         x = self.pool1(x)
+        f1_1 = x
         x = self.block2(x)
-        f2_pre = x
         x = F.relu(x)
-        f2 = x
+        f2 = x  
 
         x = self.pool2(x)
+        f2_1 = x
         x = self.block3(x)
-        f3_pre = x
         x = F.relu(x)
-        if h == 64:
-            x = self.pool3(x)
+        f3 = x  
+
+        x = self.pool3(x)
+        f3_1 = x
         x = self.block4(x)
-        f4_pre = x
         x = F.relu(x)
-        f3 = x
+        f4 = x  
 
         x = self.pool4(x)
+        out = x  
+
+        x = self.avgpool(out)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
 
-        if is_feat:
-            return [f0, f1, f2, f3], x
-        else:
-            return x
+        a1 = torch.cuda.FloatTensor(64, 128, 56, 56).uniform_() > 0.6
+        o1 = f1_1.masked_fill(a1, 0)
+        a2 = torch.cuda.FloatTensor(64, 256, 28, 28).uniform_() > 0.6
+        o2 = f2_1.masked_fill(a2, 0)
+        a3 = torch.cuda.FloatTensor(64, 512, 14, 14).uniform_() > 0.6
+        o3 = f3_1.masked_fill(a3, 0)
+        a4 = torch.cuda.FloatTensor(64, 512, 7, 7).uniform_() > 0.6
+        o4 = out.masked_fill(a4, 0)
+        branch1_out = self.branch1(o1)
+        branch2_out = self.branch2(o2)
+        branch3_out = self.branch3(o3)
+        branch4_out = self.branch4(o4)
+        branch1_out = F.normalize(branch1_out.pow(2).mean(1).view(branch1_out.size(0), -1))
+        branch2_out = F.normalize(branch2_out.pow(2).mean(1).view(branch2_out.size(0), -1))
+        branch3_out = F.normalize(branch3_out.pow(2).mean(1).view(branch3_out.size(0), -1))
+        branch4_out = F.normalize(branch4_out.pow(2).mean(1).view(branch4_out.size(0), -1))
+
+        variance1 = self._variance_param_to_variance(self.variance_param1)
+        variance2 = self._variance_param_to_variance(self.variance_param2)
+        variance3 = self._variance_param_to_variance(self.variance_param3)
+        variance4 = self._variance_param_to_variance(self.variance_param4)
+
+        if input.dim() == 4:
+            variance1 = variance1.unsqueeze(0)
+            variance2 = variance2.unsqueeze(0)
+            variance3 = variance3.unsqueeze(0)
+            variance4 = variance4.unsqueeze(0)
+
+
+        return x, [(branch1_out, variance1), (branch2_out, variance2), (branch3_out, variance3),
+                   (branch4_out, variance4)], [f1_1, f2_1, f3_1, out]
 
     @staticmethod
     def _make_layers(cfg, batch_norm=False, in_channels=3):
@@ -131,36 +227,36 @@ class Auxiliary_Classifier(nn.Module):
         super(Auxiliary_Classifier, self).__init__()
 
         self.block_extractor1 = nn.Sequential(*[nn.MaxPool2d(kernel_size=2, stride=2),
-                                                self._make_layers(cfg[1], batch_norm, cfg[0][-1]),
-                                                nn.ReLU(inplace=True),
-                                                nn.MaxPool2d(kernel_size=2, stride=2),
                                                 self._make_layers(cfg[2], batch_norm, cfg[1][-1]),
                                                 nn.ReLU(inplace=True),
                                                 nn.MaxPool2d(kernel_size=2, stride=2),
                                                 self._make_layers(cfg[3], batch_norm, cfg[2][-1]),
+                                                nn.ReLU(inplace=True),
+                                                nn.MaxPool2d(kernel_size=2, stride=2),
+                                                self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
                                                 self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
                                                 nn.AdaptiveAvgPool2d((1, 1))])
 
         self.block_extractor2 = nn.Sequential(*[nn.MaxPool2d(kernel_size=2, stride=2),
-                                                self._make_layers(cfg[2], batch_norm, cfg[1][-1]),
+                                                self._make_layers(cfg[3], batch_norm, cfg[2][-1]),
                                                 nn.ReLU(inplace=True),
                                                 nn.MaxPool2d(kernel_size=2, stride=2),
-                                                self._make_layers(cfg[3], batch_norm, cfg[2][-1]),
+                                                self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
                                                 self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
                                                 nn.AdaptiveAvgPool2d((1, 1))])
 
         self.block_extractor3 = nn.Sequential(*[nn.MaxPool2d(kernel_size=2, stride=2),
-                                                self._make_layers(cfg[3], batch_norm, cfg[2][-1]),
+                                                self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
                                                 self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
                                                 nn.AdaptiveAvgPool2d((1, 1))])
 
-        self.block_extractor4 = nn.Sequential(*[self._make_layers(cfg[3], batch_norm, cfg[4][-1]),
+        self.block_extractor4 = nn.Sequential(*[self._make_layers(cfg[4], batch_norm, cfg[4][-1]),
                                                 nn.ReLU(inplace=True),
                                                 self._make_layers(cfg[4], batch_norm, cfg[3][-1]),
                                                 nn.ReLU(inplace=True),
@@ -209,26 +305,61 @@ class Auxiliary_Classifier(nn.Module):
             idx = i + 1
             out = getattr(self, 'block_extractor' + str(idx))(x[i])
             out = out.view(-1, 512)
+            mid = out
+            mid = mid.mm(mid.t())
+            ss_logits.append(mid)
             out = getattr(self, 'fc' + str(idx))(out)
             ss_logits.append(out)
         return ss_logits
 
 
 class VGG_Auxiliary(nn.Module):
-    def __init__(self, cfg, batch_norm=False, num_classes=100):
+    def __init__(self, cfg, batch_norm=False, num_classes=1000):
         super(VGG_Auxiliary, self).__init__()
         self.backbone = VGG(cfg, batch_norm=batch_norm, num_classes=num_classes)
         self.auxiliary_classifier = Auxiliary_Classifier(cfg, batch_norm=batch_norm, num_classes=num_classes)
         self.logsigma = nn.Parameter(torch.FloatTensor(1 / 64 * torch.ones((64, 1))))
 
+        init_variance_param_value = self._variance_param_to_variance(torch.tensor(5.0))
+        self.variance_param = nn.Parameter(
+            torch.full([64], init_variance_param_value)
+        )
+
+    def _varance_to_variance_param(self, variance):
+        """
+        Convert variance to corresponding variance parameter by inverse of the softplus function.
+        :param torch.FloatTensor variance: the target variance for obtaining the variance parameter
+        """
+        return torch.log(torch.exp(variance) - 1.0)
+
+    def _variance_param_to_variance(self, variance_param):
+        """
+        Convert the variance parameter to corresponding variance by the softplus function.
+        :param torch.FloatTensor variance_param: the target variance parameter for obtaining the variance
+        """
+        return torch.log(torch.exp(variance_param) + 1.0)
+
+
     def forward(self, x, grad=False):
-        feats, logit = self.backbone(x, is_feat=True)
+        logit, mid, feats = self.backbone(x, is_feat=True)
         if grad is False:
             for i in range(len(feats)):
                 feats[i] = feats[i].detach()
         ss_logits = self.auxiliary_classifier(feats)
-        return logit, ss_logits, self.logsigma
 
+        variance1 = self._variance_param_to_variance(self.variance_param)
+        variance2 = self._variance_param_to_variance(self.variance_param)
+        variance3 = self._variance_param_to_variance(self.variance_param)
+        variance4 = self._variance_param_to_variance(self.variance_param)
+
+        if x.dim() == 4:
+            variance1 = variance1.unsqueeze(0)
+            variance2 = variance2.unsqueeze(0)
+            variance3 = variance3.unsqueeze(0)
+            variance4 = variance4.unsqueeze(0)
+
+        return logit, mid, feats, [(ss_logits[0], variance1), (ss_logits[2], variance2), (ss_logits[4], variance3),
+                                   (ss_logits[6], variance4)], [ss_logits[1], ss_logits[3], ss_logits[5], ss_logits[7]], self.logsigma1, ss_logits
 
 cfg = {
     'A': [[64], [128], [256, 256], [512, 512], [512, 512]],
@@ -237,58 +368,6 @@ cfg = {
     'E': [[64, 64], [128, 128], [256, 256, 256, 256], [512, 512, 512, 512], [512, 512, 512, 512]],
     'S': [[64], [128], [256], [512], [512]],
 }
-
-
-def vgg8(**kwargs):
-    """VGG 8-layer model (configuration "S")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG(cfg['S'], **kwargs)
-    return model
-
-
-def vgg8_bn(**kwargs):
-    """VGG 8-layer model (configuration "S")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG(cfg['S'], batch_norm=True, **kwargs)
-    return model
-
-
-def vgg8_bn_aux(**kwargs):
-    """VGG 8-layer model (configuration "S")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG_Auxiliary(cfg['S'], batch_norm=True, **kwargs)
-    return model
-
-
-def vgg11(**kwargs):
-    """VGG 11-layer model (configuration "A")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG(cfg['A'], **kwargs)
-    return model
-
-
-def vgg11_bn(**kwargs):
-    """VGG 11-layer model (configuration "A") with batch normalization"""
-    model = VGG(cfg['A'], batch_norm=True, **kwargs)
-    return model
-
-
-def vgg13(**kwargs):
-    """VGG 13-layer model (configuration "B")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG(cfg['B'], **kwargs)
-    return model
-
 
 def vgg13_bn(**kwargs):
     """VGG 13-layer model (configuration "B") with batch normalization"""
@@ -300,34 +379,3 @@ def vgg13_bn_aux(**kwargs):
     """VGG 13-layer model (configuration "B") with batch normalization"""
     model = VGG_Auxiliary(cfg['B'], batch_norm=True, **kwargs)
     return model
-
-
-def vgg16(**kwargs):
-    """VGG 16-layer model (configuration "D")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG(cfg['D'], **kwargs)
-    return model
-
-
-def vgg16_bn(**kwargs):
-    """VGG 16-layer model (configuration "D") with batch normalization"""
-    model = VGG(cfg['D'], batch_norm=True, **kwargs)
-    return model
-
-
-def vgg19(**kwargs):
-    """VGG 19-layer model (configuration "E")
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = VGG(cfg['E'], **kwargs)
-    return model
-
-
-def vgg19_bn(**kwargs):
-    """VGG 19-layer model (configuration 'E') with batch normalization"""
-    model = VGG(cfg['E'], batch_norm=True, **kwargs)
-    return model
-

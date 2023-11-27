@@ -10,17 +10,15 @@ import time
 import copy
 import models
 from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
 import torchmetrics
 import argparse
 from torch.backends import cudnn
-
 
 parser = argparse.ArgumentParser(description='PyTorch Dermnet Training')
 parser.add_argument('--data', default='/home/s316/workspace/xionggl/data/23/', type=str,
                     help='Dataset directory')
 parser.add_argument('--arch', default='resnet18_dermnet', type=str, help='network architecture')
-
+parser.add_argument('--checkpoint', default="/home/s316/.cache/torch/hub/checkpoints/resnet18-5c106cde.pth", type=str, help='pre-train weights')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 # parser.add_argument('--weight-decay', default=5e-4, type=float, help='weight decay')
 parser.add_argument('--warmup-epoch', default=0, type=int, help='warmup epoch')
@@ -28,11 +26,10 @@ parser.add_argument('--epochs', type=int, default=200, help='number of epochs to
 parser.add_argument('--batch-size', type=int, default=64, help='batch size')
 parser.add_argument('--num-workers', type=int, default=4, help='number workers')
 parser.add_argument('--gpu-id', type=str, default='0')
-parser.add_argument('--manual_seed', type=int, default=3407)
+parser.add_argument('--manual_seed', type=int, default=0)
 # parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 # parser.add_argument('--evaluate', '-e', action='store_true', help='evaluate model')
 parser.add_argument('--checkpoint_dir', default='./checkpoint', type=str, help='checkpoint dir')
-
 
 args = parser.parse_args()
 
@@ -42,16 +39,15 @@ torch.cuda.manual_seed_all(args.manual_seed)
 cudnn.deterministic = True
 cudnn.benchmark = True
 
-
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 checkpoint_dir = args.checkpoint_dir
-log_dir = str(os.path.basename(__file__).split('.')[0]) + '_b64' + '_seed' + str(args.manual_seed)
+log_dir = str(os.path.basename(__file__).split('.')[0]) + '_bs' + str(args.batch_size) + '_seed' + str(args.manual_seed)
 checkpoint_dir = os.path.join(checkpoint_dir, log_dir)
 if not os.path.isdir(checkpoint_dir):
     os.makedirs(checkpoint_dir)
 
-log_txt = 'result/' + str(os.path.basename(__file__).split('.')[0]) + '_b64' + '_seed' + str(args.manual_seed) + '.txt'
+log_txt = 'result/' + str(os.path.basename(__file__).split('.')[0]) + '_bs' + str(args.batch_size) + '_seed' + str(args.manual_seed) + '.txt'
 log_dir = str(os.path.basename(__file__).split('.')[0])
 
 data_transforms = {
@@ -70,18 +66,16 @@ data_transforms = {
 }
 
 image_datasets = {x: datasets.ImageFolder(os.path.join(args.data, x), data_transforms[x]) for x in ['train', 'test']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=64, shuffle=True, num_workers=4) for x in
+dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=args.batch_size, shuffle=True, num_workers=4) for x in
                ['train', 'test']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'test']}
 class_names = image_datasets['train'].classes
 class_nums = len(class_names)
 
-model = getattr(models, args.arch)
-
+net = getattr(models, args.arch)
 model = net(num_classes=class_nums).to(device)
-
 model_dict = model.state_dict()
-pretrained_dict = torch.load("/home/s316/.cache/torch/hub/checkpoints/resnet18-5c106cde.pth")
+pretrained_dict = torch.load(args.checkpoint)
 pretrained_dict1 = {k: v for k, v in pretrained_dict.items() if (k in model_dict and 'fc.weight' not in k and 'fc.bias' not in k)}
 model_dict.update(pretrained_dict1)
 model.load_state_dict(model_dict)
@@ -91,20 +85,17 @@ optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 exp_lr_scheduler = lr_scheduler.CosineAnnealingLR(optimizer, 70)
 
 
-
 def train_model(model, criterion, optimizer, exp_lr_scheduler):
     since = time.time()
-
     best_model_wts = copy.deepcopy(model.state_dict())
-
     best_acc = 0.0
 
     for epoch in range(args.epochs):
         print('Epoch {}/{}'.format(epoch, args.epochs - 1))
-        print('-' * 20)
-        
+
         recall = torchmetrics.Recall(task="multiclass", average='macro', num_classes=class_nums).to(device)
-        precision = torchmetrics.Precision(task="multiclass", average='macro', num_classes=class_nums).to(device)
+        f1_score = torchmetrics.F1Score(task="multiclass", average='macro', num_classes=class_nums).to(device)
+        auroc = torchmetrics.AUROC(task="multiclass", average='weighted', num_classes=class_nums).to(device)
 
         for phase in ['train', 'test']:
             if phase == 'train':
@@ -125,9 +116,10 @@ def train_model(model, criterion, optimizer, exp_lr_scheduler):
                     outputs = model(inputs)
                     _, preds = torch.max(outputs, 1)
                     loss = criterion(outputs, labels)
-                    
+
                     recall(preds, labels)
-                    precision(preds, labels)
+                    f1_score(preds, labels)
+                    auroc(outputs, labels)
 
                     if phase == 'train':
                         loss.backward()
@@ -137,25 +129,26 @@ def train_model(model, criterion, optimizer, exp_lr_scheduler):
                 running_corrects += torch.sum(preds == labels.data)
             if phase == 'train':
                 exp_lr_scheduler.step()
-            
-            
+
             total_recall = recall.compute()
-            total_precision = precision.compute()
+            total_f1_score = f1_score.compute()
+            total_auroc = auroc.compute()
 
             recall_value = total_recall.item()
-            precision_value = total_precision.item()
+            f1_score_value = total_f1_score.item()
+            auroc_value = total_auroc.item()
 
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
-            print('{} Loss: {:.4f} Acc: {:.4f} Recall: {:.4f} precision: {:.4f}'.format(phase, epoch_loss, epoch_acc, recall_value, precision_value))
+            print('{} Loss: {:.4f} Acc: {:.4f} Recall: {:.4f} f1: {:.4f} auroc: {:.4f}'.format(phase, epoch_loss, epoch_acc, recall_value, f1_score_value, auroc_value))
 
             if phase == 'train':
                 with open(log_txt, 'a+') as f:
-                    f.write('Epoch: {}\t {} Loss: {:.4f}\t Acc: {:.4f}\t Recall: {:.4f}\t precision: {:.4f}\t'.format(epoch, phase, epoch_loss, epoch_acc, recall_value, precision_value))
+                    f.write('Epoch: {}\t {} Loss: {:.4f}\t Acc: {:.4f}\t Recall: {:.4f}\t f1: {:.4f}\t auroc: {:.4f}\n'.format(epoch, phase, epoch_loss, epoch_acc, recall_value, f1_score_value, auroc_value))
             else:
                 with open(log_txt, 'a+') as f:
-                    f.write('{} Loss: {:.4f}\t Acc: {:.4f}\t Recall: {:.4f}\t precision: {:.4f}\n'.format(phase, epoch_loss, epoch_acc, recall_value, precision_value))
+                    f.write('\t\t{} Loss: {:.4f}\t Acc: {:.4f}\t Recall: {:.4f}\t f1: {:.4f}\t auroc: {:.4f}\n'.format(phase, epoch_loss, epoch_acc, recall_value, f1_score_value, auroc_value))
 
             state = {
                 'net': model.state_dict(),
@@ -174,9 +167,10 @@ def train_model(model, criterion, optimizer, exp_lr_scheduler):
             if is_best:
                 shutil.copyfile(os.path.join(checkpoint_dir, 'resnet18' + '.pth.tar'),
                                 os.path.join(checkpoint_dir, 'resnet18' + '_best.pth.tar'))
-            
-            precision.reset()
+
             recall.reset()
+            f1_score.reset()
+            auroc.reset()
 
         print()
 
